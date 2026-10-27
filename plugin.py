@@ -128,6 +128,36 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         return bool(self.config.plugin.enabled and self.config.boost.enabled)
 
+    async def on_load(self) -> None:
+        """插件加载完成后输出一次生效参数，并自检插件到宿主的数据库能力回环。"""
+
+        config = self.config.boost
+        self.ctx.logger.info(
+            "黑话提前确认已加载：min_count=%s target_count=%s max_boosts_per_batch=%s",
+            config.min_count,
+            config.target_count,
+            config.max_boosts_per_batch,
+        )
+        # 只读自检：确认钩子里要用的 database.query 能力能通，免得等到真正提取时才发现回环问题。
+        try:
+            rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
+        except Exception as exc:
+            self.ctx.logger.warning("数据库回环自检失败：%s", exc)
+            return
+        row_count = len(rows) if isinstance(rows, list) else 0
+        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", row_count)
+
+    async def on_unload(self) -> None:
+        """插件卸载回调；本插件不持有需要落盘的状态。"""
+
+        self.ctx.logger.info("黑话提前确认已卸载")
+
+    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
+        """配置热更新回调；参数由宿主传入，插件读取时始终以 self.config 为准。"""
+
+        del scope, config_data, version
+        self.ctx.logger.info("黑话提前确认配置已更新")
+
     async def _boost_entries(self, session_id: str, entries: List[Any]) -> None:
         """遍历本次提取的词条，在预算内给够格的记录补 count。
 
