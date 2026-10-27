@@ -145,6 +145,13 @@ class JargonBoostPlugin(MaiBotPlugin):
             return
         row_count = len(rows) if isinstance(rows, list) else 0
         self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", row_count)
+        if config.shared_globally:
+            # shared_globally=true 时插件对库里所有 Jargon 记录放行；只有确认 bot 的黑话共享组是 */* 才安全，
+            # 但插件读不到那份配置，只能提醒用户自己核对。
+            self.ctx.logger.warning(
+                "黑话加速器：shared_globally=true 会对所有 Jargon 记录补 count。"
+                "如果你的 bot 只共享部分群，请把它改成 false，否则别的群的词条也会被提前确认。"
+            )
 
     async def on_unload(self) -> None:
         """插件卸载回调；本插件不持有需要落盘的状态。"""
@@ -230,6 +237,8 @@ class JargonBoostPlugin(MaiBotPlugin):
         "jargon_boost",
         description="手动把够格的黑话词条 count 补到推断阈值",
         pattern=r"(?s)^/黑话加速(?:\s+(?P<args>.*))?$",
+        # 手动入口会写库并触发一批 LLM 推断，只允许操作员执行；自动钩子路径不受影响。
+        permission="operator",
     )
     async def handle_command(self, **kwargs: Any) -> Tuple[bool, Optional[str], int]:
         """命令入口：``/黑话加速`` 直接补，``/黑话加速 dry`` 只检查。"""

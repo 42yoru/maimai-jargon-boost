@@ -355,6 +355,15 @@ class EntryAndCommandTests(PluginTestCase):
         self.assertEqual(plugin._entry_content(" 贴贴 "), "贴贴")
         self.assertEqual(plugin._entry_content(None), "")
 
+    async def test_command_requires_operator_permission(self) -> None:
+        """手动入口会写库并触发一批 LLM 推断，必须是 operator 权限。"""
+
+        plugin = await self.build_plugin()
+
+        command = next(c for c in plugin.get_components() if c.get("name") == "jargon_boost")
+
+        self.assertEqual(command["metadata"].get("permission"), "operator")
+
     async def test_command_sends_receipt(self) -> None:
         self.host.rows = [_row("alpha", count=2)]
         plugin = await self.build_plugin()
