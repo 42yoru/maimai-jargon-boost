@@ -7,3 +7,5 @@ enabled = true
 min_count = 2
 target_count = 3
 max_boosts_per_batch = 2
+shared_globally = true
+dry_run = false

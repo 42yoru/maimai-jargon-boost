@@ -8,6 +8,9 @@
 主程序随后会自己把 count 再 +1，并通过 `_should_infer_meaning` 判定，
 用原有的三段推断、原有的 prompt 和原有的含义写回流程完成确认。
 
+也提供手动入口（工具 `jargon_boost_run` / 命令 `/黑话加速`），
+不想等提取时可以直接扫一遍库、把够格的记录补上。
+
 为什么这样设计（异常关闭 / 重启相关）：
 
 1. 插件不保存任何「已处理」内存状态，全部判断都读数据库当前值。
@@ -22,19 +25,30 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncio
 import json
 
-from maibot_sdk import Field, HookHandler, MaiBotPlugin, PluginConfigBase
-from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
+
+from .config_ui import build_config_ui_schema
 
 JARGON_MODEL_NAME = "Jargon"
 """主程序 Jargon 数据模型名，对应 database_model 中的类名。"""
 
 MANUAL_CREATOR = "MANUAL"
 """手动录入来源；这类记录主程序不会推断，插件也不应干预。"""
+
+DEFAULT_MANUAL_LIMIT = 20
+"""手动入口默认最多补多少条。"""
+
+MAX_MANUAL_LIMIT = 100
+"""手动入口单次上限，避免一次请求扫太多记录。"""
+
+MAX_BOOST_LOGS = 10
+"""手动入口回执里最多列多少条明细。"""
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -75,6 +89,14 @@ class BoostSectionConfig(PluginConfigBase):
         le=10,
         description="每次提取最多补几条，控制同时触发的推断数量（每次推断会调用 3 次 LLM）",
     )
+    shared_globally: bool = Field(
+        default=True,
+        description="主程序的黑话共享组是 */* 全局共享时保持开启；只共享部分群时关闭，插件会退回只看当前会话",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="只写日志、不修改 count，用来观察会补哪些词",
+    )
 
 
 class JargonBoostConfig(PluginConfigBase):
@@ -89,10 +111,53 @@ class JargonBoostPlugin(MaiBotPlugin):
 
     config_model = JargonBoostConfig
 
+    @classmethod
+    def build_config_schema(cls, **plugin_info: Any) -> Dict[str, Any]:
+        """只重组 WebUI 的展示结构，配置模型与 TOML 路径保持不变。"""
+
+        return build_config_ui_schema(super().build_config_schema(**plugin_info))
+
     def __init__(self) -> None:
         super().__init__()
-        # 多个聊天流可能同时触发提取，串行化数据库读写，避免同一条记录被并发补两次。
+        # 多个聊天流可能同时触发提取，手动命令也可能并发调用；串行化数据库读写，
+        # 避免同一条记录被并发补两次。
         self._lock = asyncio.Lock()
+
+    # ── 生命周期 ──────────────────────────────────────────────────
+
+    async def on_load(self) -> None:
+        """插件加载完成后输出一次生效参数，并自检插件到宿主的数据库能力回环。"""
+
+        config = self.config.boost
+        self.ctx.logger.info(
+            "黑话提前确认已加载：min_count=%s target_count=%s max_boosts_per_batch=%s shared_globally=%s dry_run=%s",
+            config.min_count,
+            config.target_count,
+            config.max_boosts_per_batch,
+            config.shared_globally,
+            config.dry_run,
+        )
+        # 只读自检：确认钩子里要用的 database.query 能力能通，免得等到真正提取时才发现回环问题。
+        try:
+            rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
+        except Exception as exc:
+            self.ctx.logger.warning("数据库回环自检失败：%s", exc)
+            return
+        row_count = len(rows) if isinstance(rows, list) else 0
+        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", row_count)
+
+    async def on_unload(self) -> None:
+        """插件卸载回调；本插件不持有需要落盘的状态。"""
+
+        self.ctx.logger.info("黑话提前确认已卸载")
+
+    async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
+        """配置热更新回调；插件没有缓存，读取时始终以 self.config 为准。"""
+
+        del config_data, version
+        self.ctx.logger.info("黑话提前确认配置已更新：scope=%s", scope)
+
+    # ── 钩子 ─────────────────────────────────────────────────────
 
     @HookHandler(
         "jargon.extract.before_persist",
@@ -123,40 +188,73 @@ class JargonBoostPlugin(MaiBotPlugin):
             self.ctx.logger.warning("黑话提前确认失败，已跳过本次提取：%s", exc)
         return {"action": "continue"}
 
+    # ── 手动入口 ─────────────────────────────────────────────────
+
+    @Tool(
+        "jargon_boost_run",
+        description=(
+            "手动把已经出现多次、但还没到主程序推断阈值的黑话词条 count 补到首推档，"
+            "让主程序尽快完成含义确认。只有主人明确要求时才调用；"
+            "dry_run=true 时只检查不写入。"
+        ),
+        parameters=[
+            ToolParameterInfo(
+                name="dry_run",
+                param_type=ToolParamType.BOOLEAN,
+                description="只检查会补哪些词，不真的修改 count",
+                required=False,
+            ),
+            ToolParameterInfo(
+                name="limit",
+                param_type=ToolParamType.INTEGER,
+                description=f"最多补几条，默认 {DEFAULT_MANUAL_LIMIT}",
+                required=False,
+            ),
+        ],
+    )
+    async def handle_manual_boost(
+        self,
+        dry_run: bool = False,
+        limit: int = DEFAULT_MANUAL_LIMIT,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """工具入口：手动扫描并补 count。"""
+
+        del kwargs
+        if not self._is_active():
+            return {"success": False, "content": "黑话提前确认已在配置里关闭。"}
+        report = await self._manual_boost(limit=limit, dry_run=dry_run or self.config.boost.dry_run)
+        return {"success": True, "content": report}
+
+    @Command(
+        "jargon_boost",
+        description="手动把够格的黑话词条 count 补到推断阈值",
+        pattern=r"(?s)^/黑话加速(?:\s+(?P<args>.*))?$",
+    )
+    async def handle_command(self, **kwargs: Any) -> Tuple[bool, Optional[str], int]:
+        """命令入口：``/黑话加速`` 直接补，``/黑话加速 dry`` 只检查。"""
+
+        if not self._is_active():
+            return False, None, 1
+        matched_groups: Dict[str, Any] = kwargs.get("matched_groups") or {}
+        raw_args = str(matched_groups.get("args") or "").strip().lower()
+        dry_run = raw_args in {"dry", "dry_run", "预演", "检查"} or self.config.boost.dry_run
+        stream_id = str(kwargs.get("stream_id") or "").strip()
+        try:
+            report = await self._manual_boost(limit=DEFAULT_MANUAL_LIMIT, dry_run=dry_run)
+        except Exception as exc:
+            self.ctx.logger.warning("黑话加速命令执行失败：%s", exc)
+            report = f"黑话加速执行失败：{exc}"
+        if stream_id:
+            await self.ctx.send.text(report, stream_id)
+        return True, None, 1
+
+    # ── 核心逻辑 ─────────────────────────────────────────────────
+
     def _is_active(self) -> bool:
         """判断插件总开关和分区开关是否都打开。"""
 
         return bool(self.config.plugin.enabled and self.config.boost.enabled)
-
-    async def on_load(self) -> None:
-        """插件加载完成后输出一次生效参数，并自检插件到宿主的数据库能力回环。"""
-
-        config = self.config.boost
-        self.ctx.logger.info(
-            "黑话提前确认已加载：min_count=%s target_count=%s max_boosts_per_batch=%s",
-            config.min_count,
-            config.target_count,
-            config.max_boosts_per_batch,
-        )
-        # 只读自检：确认钩子里要用的 database.query 能力能通，免得等到真正提取时才发现回环问题。
-        try:
-            rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
-        except Exception as exc:
-            self.ctx.logger.warning("数据库回环自检失败：%s", exc)
-            return
-        row_count = len(rows) if isinstance(rows, list) else 0
-        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", row_count)
-
-    async def on_unload(self) -> None:
-        """插件卸载回调；本插件不持有需要落盘的状态。"""
-
-        self.ctx.logger.info("黑话提前确认已卸载")
-
-    async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
-        """配置热更新回调；参数由宿主传入，插件读取时始终以 self.config 为准。"""
-
-        del scope, config_data, version
-        self.ctx.logger.info("黑话提前确认配置已更新")
 
     async def _boost_entries(self, session_id: str, entries: List[Any]) -> None:
         """遍历本次提取的词条，在预算内给够格的记录补 count。
@@ -182,8 +280,71 @@ class JargonBoostPlugin(MaiBotPlugin):
                         break
                     if not self._is_boostable(row, session_id, config):
                         continue
-                    if await self._raise_count(row, config.target_count):
+                    if await self._raise_count(row, config.target_count, dry_run=config.dry_run):
                         budget -= 1
+
+    async def _manual_boost(self, limit: int, dry_run: bool) -> str:
+        """手动扫描一批候选记录并补 count，返回给用户看的回执。
+
+        Args:
+            limit: 最多补多少条。
+            dry_run: 是否只记录不写入。
+
+        Returns:
+            str: 回执文本。
+        """
+
+        config = self.config.boost
+        if not config.enabled:
+            return "黑话提前确认已在配置里关闭。"
+        scan_limit = max(1, min(int(limit or DEFAULT_MANUAL_LIMIT), MAX_MANUAL_LIMIT))
+        candidates = await self._scan_candidates(scan_limit)
+        if not candidates:
+            return f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条）。"
+
+        boosted: List[str] = []
+        failed = 0
+        async with self._lock:
+            for row in candidates:
+                old_count = self._as_int(row.get("count"))
+                if await self._raise_count(row, config.target_count, dry_run=dry_run):
+                    boosted.append(f"「{row.get('content')}」count {old_count} → {config.target_count}")
+                else:
+                    failed += 1
+
+        mode = "预演" if dry_run else "已写入"
+        lines = [f"黑话提前确认（{mode}）：候选 {len(candidates)} 条，处理 {len(boosted)} 条，失败 {failed} 条。"]
+        lines.extend(f"- {item}" for item in boosted[:MAX_BOOST_LOGS])
+        if len(boosted) > MAX_BOOST_LOGS:
+            lines.append(f"- ……还有 {len(boosted) - MAX_BOOST_LOGS} 条")
+        return "\n".join(lines)
+
+    async def _scan_candidates(self, limit: int) -> List[Dict[str, Any]]:
+        """从数据库里挑出当前够格补 count 的记录。
+
+        Args:
+            limit: 最多返回多少条。
+
+        Returns:
+            List[Dict[str, Any]]: 候选记录列表。
+        """
+
+        rows = await self.ctx.db.query(
+            JARGON_MODEL_NAME,
+            query_type="get",
+            filters={"is_jargon": False, "last_inference_count": 0},
+            order_by=["-count"],
+            limit=max(limit * 3, 50),
+        )
+        if not isinstance(rows, list):
+            return []
+        config = self.config.boost
+        candidates = [
+            row
+            for row in rows
+            if isinstance(row, dict) and self._is_boostable(row, "", config)
+        ]
+        return candidates[:limit]
 
     @staticmethod
     def _entry_content(entry: Any) -> str:
@@ -227,7 +388,7 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         Args:
             row: 数据库记录字典。
-            session_id: 当前聊天流会话 ID。
+            session_id: 当前聊天流会话 ID；手动扫描时传空字符串。
             config: 提前确认配置。
 
         Returns:
@@ -236,7 +397,7 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         if row.get("id") is None:
             return False
-        if not self._row_in_scope(row, session_id):
+        if not self._row_in_scope(row, session_id, config):
             return False
         if str(row.get("created_by") or "") == MANUAL_CREATOR:
             return False
@@ -250,13 +411,16 @@ class JargonBoostPlugin(MaiBotPlugin):
         return config.min_count <= count < config.target_count
 
     @staticmethod
-    def _row_in_scope(row: Dict[str, Any], session_id: str) -> bool:
-        """判断记录是否属于当前会话（或全局共享）。
+    def _row_in_scope(row: Dict[str, Any], session_id: str, config: BoostSectionConfig) -> bool:
+        """判断记录是否属于当前会话语义范围。
 
-        主程序匹配记录时还会考虑黑话共享组；插件没有那份配置视图，
-        因此这里只认精确会话和全局记录，共享组场景会保守地跳过。
+        主程序匹配记录时用的是配置解析后的「共享组会话集合」；插件拿不到那份解析结果，
+        因此按配置走两条路：全局共享（与 `*/*` 组等价）时全部放行；
+        否则只认当前会话和 is_global 记录，共享组场景会保守地跳过。
         """
 
+        if config.shared_globally:
+            return True
         if bool(row.get("is_global")):
             return True
         raw_session_dict = row.get("session_id_dict")
@@ -268,19 +432,29 @@ class JargonBoostPlugin(MaiBotPlugin):
             return False
         return isinstance(session_dict, dict) and session_id in session_dict
 
-    async def _raise_count(self, row: Dict[str, Any], target_count: int) -> bool:
+    async def _raise_count(self, row: Dict[str, Any], target_count: int, *, dry_run: bool = False) -> bool:
         """把单条记录的 count 补到目标值。
 
         Args:
             row: 数据库记录字典。
             target_count: 目标 count 值。
+            dry_run: 只记录不写入。
 
         Returns:
-            bool: 补成功时返回 True。
+            bool: 处理成功时返回 True（dry_run 也算成功）。
         """
 
         jargon_id = row.get("id")
         old_count = self._as_int(row.get("count"))
+        content = str(row.get("content") or "")
+        if dry_run:
+            self.ctx.logger.info(
+                "黑话提前确认（预演）：「%s」count %s → %s（未写入）",
+                content,
+                old_count,
+                target_count,
+            )
+            return True
         try:
             await self.ctx.db.query(
                 JARGON_MODEL_NAME,
@@ -289,11 +463,11 @@ class JargonBoostPlugin(MaiBotPlugin):
                 filters={"id": jargon_id},
             )
         except Exception as exc:
-            self.ctx.logger.warning("黑话「%s」补 count 失败：%s", row.get("content"), exc)
+            self.ctx.logger.warning("黑话「%s」补 count 失败：%s", content, exc)
             return False
         self.ctx.logger.info(
             "黑话提前确认：「%s」count %s → %s（下一次提取将触发主程序推断）",
-            row.get("content"),
+            content,
             old_count,
             target_count,
         )
