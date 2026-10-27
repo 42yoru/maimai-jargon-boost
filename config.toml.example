@@ -1,0 +1,20 @@
+# 黑话提前确认插件配置示例。
+# 宿主会在首次加载时按 config_model 自动生成 config.toml，本文件只用于说明默认值。
+
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[boost]
+# 提前确认总开关；关掉后钩子仍然挂载但不会补 count
+enabled = true
+# 词条至少被抽到几次才有资格补
+min_count = 2
+# 补到的 count 值；主程序随后会再 +1，所以 3 表示刚好落到首推阈值 4
+target_count = 3
+# 每次提取最多补几条，控制同时触发的推断数量
+max_boosts_per_batch = 2
+# 与主程序的黑话共享组保持一致：bot 配置是 */* 全局共享时保持 true
+shared_globally = true
+# 只写日志、不改 count，用来观察会补哪些词
+dry_run = false

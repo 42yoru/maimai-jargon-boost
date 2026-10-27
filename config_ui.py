@@ -60,7 +60,10 @@ _HINTS: Dict[str, str] = {
     "boost.min_count": "词条至少被抽到几次才有资格补；2 表示第二次出现就会补。",
     "boost.target_count": "补到的 count 值。主程序随后会再 +1，所以 3 表示刚好落到首推阈值 4。",
     "boost.max_boosts_per_batch": "每次提取最多补几条，用来控制同时触发的推断数量（每条推断会调用 3 次 LLM）。",
-    "boost.shared_globally": "与主程序的黑话共享组保持一致：bot 配置里是 `*/*` 全局共享时保持开启；只共享部分群时关闭，插件就只处理当前会话的记录。",
+    "boost.shared_globally": (
+        "与主程序的黑话共享组保持一致：bot 配置里是 `*/*` 全局共享时保持开启；"
+        "只共享部分群时关闭，插件就只处理当前会话的记录。"
+    ),
     "boost.dry_run": "开启后只写日志、不修改 count，用来观察到底会补哪些词。",
     "plugin.enabled": "插件总开关。",
     "plugin.config_version": "由插件自己维护，不要手改。",
