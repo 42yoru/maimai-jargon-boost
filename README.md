@@ -47,14 +47,14 @@
 
 ### 1. 黑话学习只在上下文裁切时跑
 
-主程序只在**上下文的真实收发消息数**达到 `ceil(max_context_size × 1.2)` 时裁切，并提交后台学习：
+主程序只在**上下文的真实收发消息数**达到 `ceil(max_context_size × 1.2)` 时裁切，并提交后台学习。下面是 Maibot 源码的默认值（`src/config/official_configs.py` 的 `ChatConfig`），实际以 `bot_config.toml` 的 `chat.max_context_size` / `chat.max_private_context_size` 为准：
 
-| 聊天类型 | `max_context_size` | 裁切阈值 | 裁切后保留 |
-|---|---|---|---|
-| 群聊 | 60（默认） | 72 条 | 约 12 条 |
-| 私聊 | 50（默认） | 60 条 | 约 10 条 |
+| 聊天类型 | 配置项 | 源码默认 | 裁切阈值 | 裁切后保留 |
+|---|---|---|---|---|
+| 群聊 | `chat.max_context_size` | 30 | 36 条 | 6 条 |
+| 私聊 | `chat.max_private_context_size` | 60 | 72 条 | 12 条 |
 
-测试群上下文太短，基本不会裁切，所以等不到自动学习——这正是提供手动入口的原因。真实群聊聊到裁切后才会自动跑。
+阈值和保留条数由 `src/maisaka/context/post_processor.py` 计算：`TRIM_THRESHOLD_RATIO = 1.2`、`TRIM_TARGET_RATIO = 0.2`、`MIN_RETAINED_CHAT_MESSAGES = 5`。你的配置调高或调低，阈值会跟着变；消息量小的场景到不了阈值，这正是提供手动入口的原因。
 
 ### 2. 只补「首推」，不重复补
 
