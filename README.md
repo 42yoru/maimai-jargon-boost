@@ -1,4 +1,4 @@
-# 黑话提前确认（Jargon Boost）
+# 黑话加速器（Jargon Boost）
 
 <p>
   <a href="https://github.com/42yoru/maimai-jargon-boost/actions/workflows/ci.yml"><img src="https://github.com/42yoru/maimai-jargon-boost/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -25,7 +25,7 @@
 每次黑话提取写库前，日志里会出现：
 
 ```
-黑话提前确认：「楠娘」count 2 → 3（下一次提取将触发主程序推断）
+黑话加速器：「楠娘」count 2 → 3（下一次提取将触发主程序推断）
 ```
 
 下一次裁切学习命中它时，主程序会照常完成确认：
@@ -38,7 +38,7 @@
 
 ```
 /黑话加速 dry
-→ 黑话提前确认（预演）：候选 20 条，处理 20 条，失败 0 条。
+→ 黑话加速器（预演）：候选 20 条，处理 20 条，失败 0 条。
   - 「示例词」count 2 → 3
   …
 ```
@@ -98,7 +98,7 @@ item_id = "*"
 
 ### 第 3 步：验证
 
-在群里发一句带来黑话的闲聊，或者直接用手动入口扫一遍。日志出现「黑话提前确认」就说明钩子通了。
+在群里发一句带来黑话的闲聊，或者直接用手动入口扫一遍。日志出现「黑话加速器」就说明钩子通了。
 
 ## 配置
 

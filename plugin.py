@@ -1,4 +1,4 @@
-"""黑话提前确认插件（jargon_boost）。
+"""黑话加速器插件（jargon_boost）。
 
 主程序的黑话含义推断要等某条黑话的 count 涨到 4 / 8 / 25 / 100 才触发，
 但很多词条在聊天里只被抽到一两次就沉底了，于是长期停在「未确认」。
@@ -63,9 +63,9 @@ class PluginSectionConfig(PluginConfigBase):
 
 
 class BoostSectionConfig(PluginConfigBase):
-    """黑话提前确认参数。"""
+    """黑话加速器参数。"""
 
-    __ui_label__ = "提前确认"
+    __ui_label__ = "加速参数"
     __ui_icon__ = "zap"
     __ui_order__ = 1
 
@@ -100,7 +100,7 @@ class BoostSectionConfig(PluginConfigBase):
 
 
 class JargonBoostConfig(PluginConfigBase):
-    """黑话提前确认插件配置。"""
+    """黑话加速器插件配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     boost: BoostSectionConfig = Field(default_factory=BoostSectionConfig)
@@ -130,7 +130,7 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         config = self.config.boost
         self.ctx.logger.info(
-            "黑话提前确认已加载：min_count=%s target_count=%s max_boosts_per_batch=%s shared_globally=%s dry_run=%s",
+            "黑话加速器已加载：min_count=%s target_count=%s max_boosts_per_batch=%s shared_globally=%s dry_run=%s",
             config.min_count,
             config.target_count,
             config.max_boosts_per_batch,
@@ -149,13 +149,13 @@ class JargonBoostPlugin(MaiBotPlugin):
     async def on_unload(self) -> None:
         """插件卸载回调；本插件不持有需要落盘的状态。"""
 
-        self.ctx.logger.info("黑话提前确认已卸载")
+        self.ctx.logger.info("黑话加速器已卸载")
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         """配置热更新回调；插件没有缓存，读取时始终以 self.config 为准。"""
 
         del config_data, version
-        self.ctx.logger.info("黑话提前确认配置已更新：scope=%s", scope)
+        self.ctx.logger.info("黑话加速器配置已更新：scope=%s", scope)
 
     # ── 钩子 ─────────────────────────────────────────────────────
 
@@ -185,7 +185,7 @@ class JargonBoostPlugin(MaiBotPlugin):
                 await self._boost_entries(session_id, entries)
         except Exception as exc:
             # 任何失败都只记录，不打断主程序的黑话提取流程。
-            self.ctx.logger.warning("黑话提前确认失败，已跳过本次提取：%s", exc)
+            self.ctx.logger.warning("黑话加速器失败，已跳过本次提取：%s", exc)
         return {"action": "continue"}
 
     # ── 手动入口 ─────────────────────────────────────────────────
@@ -222,7 +222,7 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         del kwargs
         if not self._is_active():
-            return {"success": False, "content": "黑话提前确认已在配置里关闭。"}
+            return {"success": False, "content": "黑话加速器已在配置里关闭。"}
         report = await self._manual_boost(limit=limit, dry_run=dry_run or self.config.boost.dry_run)
         return {"success": True, "content": report}
 
@@ -296,7 +296,7 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         config = self.config.boost
         if not config.enabled:
-            return "黑话提前确认已在配置里关闭。"
+            return "黑话加速器已在配置里关闭。"
         scan_limit = max(1, min(int(limit or DEFAULT_MANUAL_LIMIT), MAX_MANUAL_LIMIT))
         candidates = await self._scan_candidates(scan_limit)
         if not candidates:
@@ -313,7 +313,7 @@ class JargonBoostPlugin(MaiBotPlugin):
                     failed += 1
 
         mode = "预演" if dry_run else "已写入"
-        lines = [f"黑话提前确认（{mode}）：候选 {len(candidates)} 条，处理 {len(boosted)} 条，失败 {failed} 条。"]
+        lines = [f"黑话加速器（{mode}）：候选 {len(candidates)} 条，处理 {len(boosted)} 条，失败 {failed} 条。"]
         lines.extend(f"- {item}" for item in boosted[:MAX_BOOST_LOGS])
         if len(boosted) > MAX_BOOST_LOGS:
             lines.append(f"- ……还有 {len(boosted) - MAX_BOOST_LOGS} 条")
@@ -449,7 +449,7 @@ class JargonBoostPlugin(MaiBotPlugin):
         content = str(row.get("content") or "")
         if dry_run:
             self.ctx.logger.info(
-                "黑话提前确认（预演）：「%s」count %s → %s（未写入）",
+                "黑话加速器（预演）：「%s」count %s → %s（未写入）",
                 content,
                 old_count,
                 target_count,
@@ -466,7 +466,7 @@ class JargonBoostPlugin(MaiBotPlugin):
             self.ctx.logger.warning("黑话「%s」补 count 失败：%s", content, exc)
             return False
         self.ctx.logger.info(
-            "黑话提前确认：「%s」count %s → %s（下一次提取将触发主程序推断）",
+            "黑话加速器：「%s」count %s → %s（下一次提取将触发主程序推断）",
             content,
             old_count,
             target_count,

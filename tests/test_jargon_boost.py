@@ -1,4 +1,4 @@
-"""黑话提前确认插件的单元测试。
+"""黑话加速器插件的单元测试。
 
 用标准库 unittest；插件模块按 Runner 的方式（importlib + 子模块搜索路径）加载，
 这样 plugin.py 里的相对导入才可用。不导入宿主 ``src.*``，避免连带启动整个 MaiBot：
@@ -366,7 +366,7 @@ class EntryAndCommandTests(PluginTestCase):
 
         self.assertEqual(result, (True, None, 1))
         self.assertEqual(len(self.host.sent), 1)
-        self.assertIn("黑话提前确认", self.host.sent[0][1])
+        self.assertIn("黑话加速器", self.host.sent[0][1])
 
     async def test_command_dry_mode(self) -> None:
         self.host.rows = [_row("alpha", count=2)]

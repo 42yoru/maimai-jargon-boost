@@ -24,7 +24,7 @@ class _Section:
 _SECTIONS: Dict[str, _Section] = {
     "boost": _Section(
         source="boost",
-        title="提前确认",
+        title="加速参数",
         description=(
             "把已经抽到多次、但还没到主程序推断阈值的黑话 count 提前补到首推档；"
             "随后主程序会用原有的三段推断把含义确认下来。"
