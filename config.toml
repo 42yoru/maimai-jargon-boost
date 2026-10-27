@@ -1,0 +1,9 @@
+[plugin]
+enabled = true
+config_version = "1.0.0"
+
+[boost]
+enabled = true
+min_count = 2
+target_count = 3
+max_boosts_per_batch = 2
