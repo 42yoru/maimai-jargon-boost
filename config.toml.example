@@ -1,4 +1,4 @@
-# 黑话提前确认插件配置示例。
+# 黑话加速器插件配置示例。
 # 宿主会在首次加载时按 config_model 自动生成 config.toml，本文件只用于说明默认值。
 
 [plugin]
@@ -14,7 +14,7 @@ min_count = 2
 target_count = 3
 # 每次提取最多补几条，控制同时触发的推断数量
 max_boosts_per_batch = 2
-# 与主程序的黑话共享组保持一致：bot 配置是 */* 全局共享时保持 true
-shared_globally = true
+# 默认只处理当前会话；只有 bot 配置是 */* 全局共享时才改成 true
+shared_globally = false
 # 只写日志、不改 count，用来观察会补哪些词
 dry_run = false

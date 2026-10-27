@@ -90,8 +90,11 @@ class BoostSectionConfig(PluginConfigBase):
         description="每次提取最多补几条，控制同时触发的推断数量（每次推断会调用 3 次 LLM）",
     )
     shared_globally: bool = Field(
-        default=True,
-        description="主程序的黑话共享组是 */* 全局共享时保持开启；只共享部分群时关闭，插件会退回只看当前会话",
+        default=False,
+        description=(
+            "默认只处理当前会话的记录；只有 bot 的黑话共享组是 */* 全局共享时才改成开启，"
+            "避免给别的群的词条补 count"
+        ),
     )
     dry_run: bool = Field(
         default=False,

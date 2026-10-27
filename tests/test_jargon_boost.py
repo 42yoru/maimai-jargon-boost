@@ -173,7 +173,7 @@ class PluginTestCase(IsolatedAsyncioTestCase):
             "min_count": 2,
             "target_count": 3,
             "max_boosts_per_batch": 2,
-            "shared_globally": True,
+            "shared_globally": False,
             "dry_run": False,
         }
         boost.update(boost_overrides)

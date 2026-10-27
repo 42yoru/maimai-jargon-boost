@@ -85,7 +85,9 @@ git clone https://github.com/42yoru/maimai-jargon-boost.git
 
 ### 第 2 步：确认共享组
 
-你的 `bot_config.toml` 里如果是：
+插件默认 `shared_globally = false`，只处理**当前会话**的记录，这是最保守的默认值。
+
+如果你的 `bot_config.toml` 里是 `*/*` 全局共享：
 
 ```toml
 [[jargon.jargon_groups]]
@@ -94,10 +96,10 @@ platform = "*"
 item_id = "*"
 ```
 
-保持 `shared_globally = true`，插件会和主程序一样处理所有会话的记录。如果只共享部分群，把它改成 `false`，插件就退回只看当前会话。
+就把 `shared_globally` 改成 `true`，插件会和主程序一样处理所有会话的记录。
 
 > [!WARNING]
-> `shared_globally = true` 时插件会对**所有** `Jargon` 记录放行，包括不属于当前黑话共享组的会话。请先确认你的 `bot_config.toml` 里是不是 `*/*` 全局共享；不是的话务必改成 `false`。插件加载时也会打印一条 warning 提醒核对。
+> `shared_globally = true` 时插件会对**所有** `Jargon` 记录放行，包括不属于当前黑话共享组的会话。确认是 `*/*` 全局共享再打开；只共享部分群时保持 `false`。开启后插件加载时会打印一条 warning 提醒核对。
 
 ### 第 3 步：验证
 
@@ -114,7 +116,7 @@ enabled = true
 min_count = 2
 target_count = 3
 max_boosts_per_batch = 2
-shared_globally = true
+shared_globally = false
 dry_run = false
 ```
 
@@ -125,7 +127,7 @@ dry_run = false
 | `boost.min_count` | `2` | 词条至少被抽到几次才有资格补 |
 | `boost.target_count` | `3` | 补到的 `count`；主程序随后再 +1，所以 3 表示刚好到首推阈值 4 |
 | `boost.max_boosts_per_batch` | `2` | 每次提取最多补几条，控制同时触发的推断数量（每条推断 3 次 LLM 调用） |
-| `boost.shared_globally` | `true` | 与主程序的黑话共享组（`*/*`）保持一致；只共享部分群时**必须改成 `false`**，否则会给别的群的词条补 count |
+| `boost.shared_globally` | `false` | 默认只处理当前会话；`bot_config.toml` 是 `*/*` 全局共享时才改成 `true`，否则会给别的群的词条补 count |
 | `boost.dry_run` | `false` | 只写日志、不改 `count` |
 
 WebUI 配置页按「常用设置 / 高级」两个页签展示，带中文标签和提示。
