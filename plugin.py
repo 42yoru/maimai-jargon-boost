@@ -230,10 +230,14 @@ class JargonBoostPlugin(MaiBotPlugin):
     ) -> Dict[str, Any]:
         """工具入口：手动扫描并补 count。"""
 
-        del kwargs
+        session_id = str(kwargs.get("stream_id") or "").strip()
         if not self._is_active():
             return {"success": False, "content": "黑话加速器已在配置里关闭。"}
-        report = await self._manual_boost(limit=limit, dry_run=dry_run or self.config.boost.dry_run)
+        report = await self._manual_boost(
+            limit=limit,
+            dry_run=dry_run or self.config.boost.dry_run,
+            session_id=session_id,
+        )
         return {"success": True, "content": report}
 
     @Command(
@@ -253,7 +257,11 @@ class JargonBoostPlugin(MaiBotPlugin):
         dry_run = raw_args in {"dry", "dry_run", "预演", "检查"} or self.config.boost.dry_run
         stream_id = str(kwargs.get("stream_id") or "").strip()
         try:
-            report = await self._manual_boost(limit=DEFAULT_MANUAL_LIMIT, dry_run=dry_run)
+            report = await self._manual_boost(
+                limit=DEFAULT_MANUAL_LIMIT,
+                dry_run=dry_run,
+                session_id=stream_id,
+            )
         except Exception as exc:
             self.ctx.logger.warning("黑话加速命令执行失败：%s", exc)
             report = f"黑话加速执行失败：{exc}"
@@ -295,12 +303,13 @@ class JargonBoostPlugin(MaiBotPlugin):
                     if await self._raise_count(row, config.target_count, dry_run=config.dry_run):
                         budget -= 1
 
-    async def _manual_boost(self, limit: int, dry_run: bool) -> str:
+    async def _manual_boost(self, limit: int, dry_run: bool, session_id: str = "") -> str:
         """手动扫描一批候选记录并补 count，返回给用户看的回执。
 
         Args:
             limit: 最多补多少条。
             dry_run: 是否只记录不写入。
+            session_id: 触发入口所在的会话；shared_globally=false 时用它限制扫描范围。
 
         Returns:
             str: 回执文本。
@@ -310,7 +319,7 @@ class JargonBoostPlugin(MaiBotPlugin):
         if not config.enabled:
             return "黑话加速器已在配置里关闭。"
         scan_limit = max(1, min(int(limit or DEFAULT_MANUAL_LIMIT), MAX_MANUAL_LIMIT))
-        candidates = await self._scan_candidates(scan_limit)
+        candidates = await self._scan_candidates(scan_limit, session_id)
         if not candidates:
             return f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条）。"
 
@@ -331,11 +340,12 @@ class JargonBoostPlugin(MaiBotPlugin):
             lines.append(f"- ……还有 {len(boosted) - MAX_BOOST_LOGS} 条")
         return "\n".join(lines)
 
-    async def _scan_candidates(self, limit: int) -> List[Dict[str, Any]]:
+    async def _scan_candidates(self, limit: int, session_id: str = "") -> List[Dict[str, Any]]:
         """从数据库里挑出当前够格补 count 的记录。
 
         Args:
             limit: 最多返回多少条。
+            session_id: 触发入口所在的会话；shared_globally=false 时用它限制扫描范围。
 
         Returns:
             List[Dict[str, Any]]: 候选记录列表。
@@ -354,7 +364,7 @@ class JargonBoostPlugin(MaiBotPlugin):
         candidates = [
             row
             for row in rows
-            if isinstance(row, dict) and self._is_boostable(row, "", config)
+            if isinstance(row, dict) and self._is_boostable(row, session_id, config)
         ]
         return candidates[:limit]
 

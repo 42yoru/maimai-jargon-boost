@@ -305,7 +305,7 @@ class ManualBoostTests(PluginTestCase):
         self.host.rows = [_row("alpha", row_id=1, count=2), _row("beta", row_id=2, count=1)]
         plugin = await self.build_plugin()
 
-        report = await plugin._manual_boost(limit=10, dry_run=False)
+        report = await plugin._manual_boost(limit=10, dry_run=False, session_id=SESSION_ID)
 
         self.assertIn("候选 1 条", report)
         self.assertIn("alpha", report)
@@ -316,7 +316,7 @@ class ManualBoostTests(PluginTestCase):
         self.host.rows = [_row("alpha", count=2)]
         plugin = await self.build_plugin()
 
-        report = await plugin._manual_boost(limit=10, dry_run=True)
+        report = await plugin._manual_boost(limit=10, dry_run=True, session_id=SESSION_ID)
 
         self.assertIn("预演", report)
         self.assertEqual(self.host.rows[0]["count"], 2)
@@ -326,21 +326,36 @@ class ManualBoostTests(PluginTestCase):
         self.host.rows = [_row("alpha", row_id=1, count=2), _row("beta", row_id=2, count=2)]
         plugin = await self.build_plugin()
 
-        await plugin._manual_boost(limit=1, dry_run=False)
+        await plugin._manual_boost(limit=1, dry_run=False, session_id=SESSION_ID)
 
         self.assertEqual(len(self.host.updates), 1)
+
+    async def test_manual_boost_scoped_to_session_when_not_shared(self) -> None:
+        """shared_globally=false 时手动扫描只处理当前会话的记录。"""
+
+        self.host.rows = [
+            _row("alpha", row_id=1, count=2, sessions={SESSION_ID: 1}),
+            _row("beta", row_id=2, count=2, sessions={OTHER_SESSION: 1}),
+        ]
+        plugin = await self.build_plugin(shared_globally=False)
+
+        report = await plugin._manual_boost(limit=10, dry_run=False, session_id=SESSION_ID)
+
+        self.assertIn("候选 1 条", report)
+        self.assertEqual(self.host.rows[0]["count"], 3)
+        self.assertEqual(self.host.rows[1]["count"], 2)
 
     async def test_manual_boost_without_candidates(self) -> None:
         plugin = await self.build_plugin()
 
-        report = await plugin._manual_boost(limit=10, dry_run=False)
+        report = await plugin._manual_boost(limit=10, dry_run=False, session_id=SESSION_ID)
 
         self.assertIn("没有需要提前确认的黑话", report)
 
     async def test_manual_boost_disabled(self) -> None:
         plugin = await self.build_plugin(enabled=False)
 
-        report = await plugin._manual_boost(limit=10, dry_run=False)
+        report = await plugin._manual_boost(limit=10, dry_run=False, session_id=SESSION_ID)
 
         self.assertIn("已在配置里关闭", report)
 
