@@ -16,6 +16,8 @@ import json
 import sys
 import tempfile
 
+from pydantic import ValidationError
+
 from maibot_sdk import PluginContext, PluginPaths
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
@@ -420,6 +422,22 @@ class EntryAndCommandTests(PluginTestCase):
 
         self.assertEqual(result, (False, None, 1))
         self.assertEqual(self.host.sent, [])
+
+
+class CountConstraintTests(PluginTestCase):
+    """count 相关配置必须受宿主阈值约束，不能把推断档位一次跨过去。"""
+
+    async def test_target_count_above_first_threshold_is_rejected(self) -> None:
+        """target_count 最多到 3（宿主再 +1 = 首推阈值 4），再高会跨档甚至直接标成已确认。"""
+
+        with self.assertRaises(ValidationError):
+            await self.build_plugin(target_count=5)
+
+    async def test_min_count_must_be_below_target(self) -> None:
+        """min_count >= target_count 时一条都补不到，属于必然失效的配置。"""
+
+        with self.assertRaises(ValidationError):
+            await self.build_plugin(min_count=3, target_count=3)
 
 
 class ErrorPathTests(PluginTestCase):

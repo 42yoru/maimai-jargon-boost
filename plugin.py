@@ -30,12 +30,17 @@ from typing import Any, Dict, List, Optional, Tuple
 import asyncio
 import json
 
+from pydantic import model_validator
+
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
 
 from .config_ui import build_config_ui_schema
 
 JARGON_MODEL_NAME = "Jargon"
+
+JARGON_FIRST_INFERENCE_THRESHOLD = 4
+"""宿主首次推断的 count 阈值：把 count 补到 3，主程序本轮再 +1 就正好落到这里。"""
 """主程序 Jargon 数据模型名，对应 database_model 中的类名。"""
 
 MANUAL_CREATOR = "MANUAL"
@@ -81,8 +86,24 @@ class BoostSectionConfig(PluginConfigBase):
     target_count: int = Field(
         default=3,
         ge=1,
-        description="补到的 count 值；主程序随后会再 +1，所以 3 表示刚好落到首推阈值 4",
+        le=JARGON_FIRST_INFERENCE_THRESHOLD - 1,
+        description=(
+            "补到的 count 值；主程序随后会再 +1，所以 3 表示刚好落到首推阈值 4。"
+            f"上限 {JARGON_FIRST_INFERENCE_THRESHOLD - 1}：再高就会一次跨过后续档位，"
+            "甚至把记录直接标成已确认"
+        ),
     )
+
+    @model_validator(mode="after")
+    def _check_count_order(self) -> "BoostSectionConfig":
+        """min_count 必须小于 target_count，否则一条词条都补不到（插件会静默失效）。"""
+
+        if self.min_count >= self.target_count:
+            raise ValueError(
+                f"min_count({self.min_count}) 必须小于 target_count({self.target_count})，"
+                "否则没有任何词条能被提前确认"
+            )
+        return self
     max_boosts_per_batch: int = Field(
         default=2,
         ge=1,

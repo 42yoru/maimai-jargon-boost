@@ -1,5 +1,20 @@
 # 更新记录
 
+## 0.3.3
+
+**修复**
+
+- **`target_count` 没有上界，能一次跨过后续推断档位**：宿主在 hook 之后会对同一行再 +1，
+  所以 `target_count=5` 会让 count 直接到 6 —— 一次跨过 8/25/100 三档里的第一档；
+  填到 100 以上甚至会把记录直接标成 `is_complete`（永久不再推断）。
+  现在上限锁在 `JARGON_FIRST_INFERENCE_THRESHOLD - 1`（即 3）
+- **`min_count >= target_count` 静默失效**：`_is_boostable` 要求 `min_count <= count < target_count`，
+  两者颠倒时这条插件什么都不做且没有任何提示。现在用 `model_validator` 在配置阶段直接报错
+
+**细节**
+
+- 测试 25 → 27：新增「target_count 超过首推阈值被拒」「min_count 必须小于 target_count」
+
 ## 0.3.2
 
 **修复**
