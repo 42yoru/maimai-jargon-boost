@@ -424,6 +424,39 @@ class EntryAndCommandTests(PluginTestCase):
         self.assertEqual(self.host.sent, [])
 
 
+class PermissionAndLeakTests(PluginTestCase):
+    """命令失败不泄内部细节；工具入口要有权限门。"""
+
+    async def test_command_failure_does_not_echo_exception(self) -> None:
+        """异常原文只进日志，群里回一句人话，并且命令要算失败。"""
+
+        plugin = await self.build_plugin()
+
+        async def boom(**_kwargs: Any) -> str:
+            raise RuntimeError("数据库文件 /var/lib/secret/app.db 打不开")
+
+        plugin._manual_boost = boom  # type: ignore[method-assign]
+
+        success, _, intercept = await plugin.handle_command(
+            stream_id=SESSION_ID, matched_groups={"args": ""}
+        )
+
+        self.assertFalse(success)
+        self.assertEqual(intercept, 1)
+        text = self.host.sent[-1][1]
+        self.assertNotIn("/var/lib/secret", text)
+        self.assertIn("日志", text)
+
+    async def test_tool_requires_operator_permission(self) -> None:
+        """工具通道和命令一样要有 operator 门槛。"""
+
+        plugin = await self.build_plugin()
+
+        tool = next(item for item in plugin.get_components() if item.get("name") == "jargon_boost_run")
+
+        self.assertEqual(tool["metadata"].get("permission"), "operator")
+
+
 class QueryBatchingTests(PluginTestCase):
     """钩子路径不该为每个词条发一次 RPC。"""
 

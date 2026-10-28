@@ -224,6 +224,9 @@ class JargonBoostPlugin(MaiBotPlugin):
 
     @Tool(
         "jargon_boost_run",
+        # 这个工具会写库并触发一批 LLM 推断，命令入口有 permission="operator"，
+        # 工具通道以前没有任何门槛（任何会话都能诱导模型调用）。默认改成仅主人可用。
+        permission="operator",
         description=(
             "手动把已经出现多次、但还没到主程序推断阈值的黑话词条 count 补到首推档，"
             "让主程序尽快完成含义确认。只有主人明确要求时才调用；"
@@ -284,9 +287,14 @@ class JargonBoostPlugin(MaiBotPlugin):
                 dry_run=dry_run,
                 session_id=stream_id,
             )
-        except Exception as exc:
-            self.ctx.logger.warning("黑话加速命令执行失败：%s", exc)
-            report = f"黑话加速执行失败：{exc}"
+        except Exception:
+            # 内部细节（数据库报错、路径、仓库异常）只进日志；群里回一句人话就够了，
+            # 原来把 exc 原文直接发进群聊
+            self.ctx.logger.error("黑话加速命令执行失败", exc_info=True)
+            report = "黑话加速执行失败，详细原因已经写进日志（含堆栈），请查看麦麦日志。"
+            if stream_id:
+                await self.ctx.send.text(report, stream_id)
+            return False, None, 1
         if stream_id:
             await self.ctx.send.text(report, stream_id)
         return True, None, 1
