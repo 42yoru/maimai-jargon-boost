@@ -117,6 +117,14 @@ class FakeHost:
 
         if query_type == "get":
             matched = [row for row in self.rows if self._matches(row, filters)]
+            # 宿主先按 order_by 排序再截断，假实现也必须照做，否则「取 count 最高的 N 行」测不出来
+            order_by = args.get("order_by") or []
+            for key in reversed(order_by):
+                if not isinstance(key, str) or not key:
+                    continue
+                descending = key.startswith("-")
+                field = key[1:] if descending else key
+                matched.sort(key=lambda row: row.get(field) or 0, reverse=descending)
             limit = args.get("limit")
             if isinstance(limit, int) and limit > 0:
                 matched = matched[:limit]
@@ -124,11 +132,12 @@ class FakeHost:
 
         if query_type == "update":
             data: Dict[str, Any] = args.get("data") or {}
-            for row in self.rows:
-                if self._matches(row, filters):
-                    row.update(data)
+            # 与宿主 database_service.db_update 一致：先按条件取命中行，再写入，返回命中行数
+            affected = [row for row in self.rows if self._matches(row, filters)]
+            for row in affected:
+                row.update(data)
             self.updates.append({"data": dict(data), "filters": dict(filters)})
-            return len([row for row in self.rows if self._matches(row, filters)])
+            return len(affected)
 
         return {"success": False, "error": f"未支持 query_type: {query_type}"}
 
@@ -204,7 +213,8 @@ class HookBoostTests(PluginTestCase):
         self.assertEqual(result, {"action": "continue"})
         self.assertEqual(self.host.rows[0]["count"], 3)
         self.assertEqual(len(self.host.updates), 1)
-        self.assertEqual(self.host.updates[0]["filters"], {"id": 1})
+        # filters 带上读到的旧 count 做 CAS，避免把宿主刚 +1 的结果覆盖回更小的值
+        self.assertEqual(self.host.updates[0]["filters"], {"id": 1, "count": 2})
 
     async def test_skips_manual_creator(self) -> None:
         self.host.rows = [_row(created_by="MANUAL")]
@@ -286,16 +296,18 @@ class HookBoostTests(PluginTestCase):
 
         self.assertEqual(len(self.host.updates), 2)
 
-    async def test_hook_failure_does_not_raise(self) -> None:
+    async def test_hook_failure_propagates(self) -> None:
+        """失败必须冒到宿主：宿主管记堆栈 + 按 error_policy=SKIP 继续提取，插件自己包一层会吃掉 traceback。"""
+
         plugin = await self.build_plugin()
 
         async def broken_rpc(*args: Any, **kwargs: Any) -> Any:
             raise RuntimeError("宿主失联")
 
         plugin._ctx._rpc_call = broken_rpc  # type: ignore[attr-defined]
-        result = await self.call_hook(plugin, [{"content": "脑婆"}])
 
-        self.assertEqual(result, {"action": "continue"})
+        with self.assertRaises(RuntimeError):
+            await self.call_hook(plugin, [{"content": "脑婆"}])
 
 
 class ManualBoostTests(PluginTestCase):
@@ -408,3 +420,60 @@ class EntryAndCommandTests(PluginTestCase):
 
         self.assertEqual(result, (False, None, 1))
         self.assertEqual(self.host.sent, [])
+
+
+class ErrorPathTests(PluginTestCase):
+    """失败必须暴露，不能被降级成"没有候选"或"已成功"。"""
+
+    async def test_capability_error_is_raised_not_swallowed(self) -> None:
+        """database.query 返回 {"success": False} 时必须抛，不能当成"这个词没记录"。"""
+
+        plugin = await self.build_plugin()
+
+        # 直接让 FakeHost 返回能力错误字典（宿主 database_service 出错时的真实形状）
+        original = self.host._handle_database_query
+
+        def error_query(args: Dict[str, Any]) -> Any:
+            if str(args.get("query_type")) == "update":
+                return 1
+            return {"success": False, "error": "database is locked"}
+
+        self.host._handle_database_query = error_query  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                await self.call_hook(plugin, [{"content": "脑婆"}])
+        finally:
+            self.host._handle_database_query = original  # type: ignore[assignment]
+
+    async def test_update_without_affected_row_is_raised(self) -> None:
+        """UPDATE 命中 0 行（行被删/被宿主改过）时必须抛，不能打印"补成功"。"""
+
+        self.host.rows = [_row(count=2)]
+        plugin = await self.build_plugin()
+
+        original = self.host._handle_database_query
+
+        def no_match_update(args: Dict[str, Any]) -> Any:
+            if str(args.get("query_type")) == "update":
+                return 0
+            return original(args)
+
+        self.host._handle_database_query = no_match_update  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                await self.call_hook(plugin, [{"content": "脑婆"}])
+        finally:
+            self.host._handle_database_query = original  # type: ignore[assignment]
+
+        self.assertEqual(self.host.rows[0]["count"], 2)  # 没有被写坏
+
+    async def test_self_check_raises_on_capability_error(self) -> None:
+        """on_load 的数据库自检在能力报错时必须让加载失败，而不是打印"自检通过"。"""
+
+        original = self.host._handle_database_query
+        self.host._handle_database_query = lambda args: {"success": False, "error": "boom"}  # type: ignore[assignment]
+        try:
+            with self.assertRaises(RuntimeError):
+                await self.build_plugin()
+        finally:
+            self.host._handle_database_query = original  # type: ignore[assignment]

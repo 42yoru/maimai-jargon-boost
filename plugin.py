@@ -141,13 +141,13 @@ class JargonBoostPlugin(MaiBotPlugin):
             config.dry_run,
         )
         # 只读自检：确认钩子里要用的 database.query 能力能通，免得等到真正提取时才发现回环问题。
-        try:
-            rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
-        except Exception as exc:
-            self.ctx.logger.warning("数据库回环自检失败：%s", exc)
-            return
-        row_count = len(rows) if isinstance(rows, list) else 0
-        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", row_count)
+        # 形状不对一律抛：db_get 内部会把异常吞成空列表，插件再"当没查到"就永远发现不了故障。
+        rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
+        if isinstance(rows, dict):
+            raise RuntimeError(f"数据库回环自检失败，database.query 返回错误: {rows.get('error') or rows!r}")
+        if not isinstance(rows, list):
+            raise TypeError(f"数据库回环自检失败，database.query 返回形状异常: {type(rows).__name__}")
+        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", len(rows))
         if config.shared_globally:
             # shared_globally=true 时插件对库里所有 Jargon 记录放行；只有确认 bot 的黑话共享组是 */* 才安全，
             # 但插件读不到那份配置，只能提醒用户自己核对。
@@ -190,12 +190,10 @@ class JargonBoostPlugin(MaiBotPlugin):
 
         session_id = str(kwargs.get("session_id") or "")
         entries = kwargs.get("entries")
-        try:
-            if session_id and isinstance(entries, list) and self._is_active():
-                await self._boost_entries(session_id, entries)
-        except Exception as exc:
-            # 任何失败都只记录，不打断主程序的黑话提取流程。
-            self.ctx.logger.warning("黑话加速器失败，已跳过本次提取：%s", exc)
+        # 这里不做 try/except：宿主 runner 会 logger.error(..., exc_info=True) 记完整堆栈，
+        # 再按本插件声明的 error_policy=SKIP 继续黑话提取。插件自己再包一层只会把 traceback 换成一行字符串。
+        if session_id and isinstance(entries, list) and self._is_active():
+            await self._boost_entries(session_id, entries)
         return {"action": "continue"}
 
     # ── 手动入口 ─────────────────────────────────────────────────
@@ -388,22 +386,22 @@ class JargonBoostPlugin(MaiBotPlugin):
             limit=20,
         )
         if isinstance(result, dict):
-            # 能力层出错时返回 {"success": False, "error": ...}，这里只当没查到。
-            if not result.get("success"):
-                return []
-            return [result]
-        if isinstance(result, list):
-            return [row for row in result if isinstance(row, dict)]
-        return []
+            # 能力层出错时返回 {"success": False, "error": ...}：必须抛，不能当成"没查到"，
+            # 否则数据库故障会伪装成"这个词还没被记录"。
+            raise RuntimeError(f"查询黑话失败：{result.get('error') or result!r}")
+        if not isinstance(result, list):
+            raise TypeError(f"database.query 返回形状异常: {type(result).__name__}")
+        return [row for row in result if isinstance(row, dict)]
 
     @staticmethod
     def _as_int(value: Any) -> int:
-        """把数据库里的整数字段安全转成 int；非法值按 0 处理。"""
+        """把数据库里的整数字段转成 int。
 
-        try:
-            return int(value or 0)
-        except (TypeError, ValueError):
-            return 0
+        count / last_inference_count 在模型里是非空整型列，出现非法值说明数据或契约已坏，
+        这里直接抛错而不是折成 0——折成 0 会让该行"静默不合格"，问题永远查不出来。
+        """
+
+        return int(value)
 
     def _is_boostable(self, row: Dict[str, Any], session_id: str, config: BoostSectionConfig) -> bool:
         """判断一条黑话记录是否应该提前补 count。
@@ -477,16 +475,19 @@ class JargonBoostPlugin(MaiBotPlugin):
                 target_count,
             )
             return True
-        try:
-            await self.ctx.db.query(
-                JARGON_MODEL_NAME,
-                query_type="update",
-                data={"count": target_count},
-                filters={"id": jargon_id},
+        # 命中行数当唯一事实：宿主 db_update 内部会把异常吞成 0，所以必须看返回值。
+        # filters 里带上读到的旧 count 做 CAS，避免把宿主刚 +1 的结果覆盖回更小的值。
+        affected = await self.ctx.db.query(
+            JARGON_MODEL_NAME,
+            query_type="update",
+            data={"count": target_count},
+            filters={"id": jargon_id, "count": old_count},
+        )
+        if not isinstance(affected, int) or affected != 1:
+            raise RuntimeError(
+                f"黑话「{content}」(id={jargon_id}) 补 count 未生效："
+                f"受影响行数 {affected!r}，期望 1（读取时 count={old_count}）"
             )
-        except Exception as exc:
-            self.ctx.logger.warning("黑话「%s」补 count 失败：%s", content, exc)
-            return False
         self.ctx.logger.info(
             "黑话加速器：「%s」count %s → %s（下一次提取将触发主程序推断）",
             content,
