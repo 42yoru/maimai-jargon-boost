@@ -105,13 +105,15 @@ def build_config_ui_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
             spec = _SECTIONS[section_id]
             template_section = source_sections.get(spec.source)
             if template_section is None:
-                continue
+                # 配置节改名/删掉之后，WebUI 会安静地少一整块；直接报错更容易定位
+                raise KeyError(f"config_ui 声明的配置节在模型里不存在: {spec.source}")
             template_fields = template_section.get("fields") or {}
             fields: Dict[str, Any] = {}
             for order, (field_name, label) in enumerate(spec.fields.items()):
                 template = template_fields.get(field_name)
                 if template is None:
-                    continue
+                    # 字段改名之后 WebUI 会悄悄少一栏，用户改不了也看不出原因
+                    raise KeyError(f"config_ui 声明的字段在配置模型里不存在: {spec.source}.{field_name}")
                 fields[field_name] = _build_field(spec.source, field_name, template, label, order)
             if not fields:
                 continue

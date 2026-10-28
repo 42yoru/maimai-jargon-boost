@@ -27,13 +27,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-import asyncio
-import json
-
-from pydantic import model_validator
-
 from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
+from pydantic import model_validator
+
+import asyncio
+import json
 
 from .config_ui import build_config_ui_schema
 
@@ -199,7 +198,7 @@ class JargonBoostPlugin(MaiBotPlugin):
         description="把够格的黑话记录 count 补到首推阈值，让主程序自己触发含义推断",
         mode=HookMode.BLOCKING,
         order=HookOrder.LATE,
-        timeout_ms=4000,
+        # 不设 timeout_ms：沿用 hook spec 的默认值，自己压更紧只会更容易计入熔断
         error_policy=ErrorPolicy.SKIP,
     )
     async def before_persist(self, **kwargs: Any) -> Dict[str, Any]:
@@ -276,11 +275,15 @@ class JargonBoostPlugin(MaiBotPlugin):
         """命令入口：``/黑话加速`` 直接补，``/黑话加速 dry`` 只检查。"""
 
         if not self._is_active():
+            stream_id = str(kwargs.get("stream_id") or "").strip()
+            if stream_id:
+                await self.ctx.send.text("黑话加速器已在配置里关闭，没有执行。", stream_id)
             return False, None, 1
         matched_groups: Dict[str, Any] = kwargs.get("matched_groups") or {}
         raw_args = str(matched_groups.get("args") or "").strip().lower()
         dry_run = raw_args in {"dry", "dry_run", "预演", "检查"} or self.config.boost.dry_run
         stream_id = str(kwargs.get("stream_id") or "").strip()
+        failed = False
         try:
             report = await self._manual_boost(
                 limit=DEFAULT_MANUAL_LIMIT,
@@ -292,12 +295,18 @@ class JargonBoostPlugin(MaiBotPlugin):
             # 原来把 exc 原文直接发进群聊
             self.ctx.logger.error("黑话加速命令执行失败", exc_info=True)
             report = "黑话加速执行失败，详细原因已经写进日志（含堆栈），请查看麦麦日志。"
-            if stream_id:
-                await self.ctx.send.text(report, stream_id)
-            return False, None, 1
+            failed = True
         if stream_id:
-            await self.ctx.send.text(report, stream_id)
-        return True, None, 1
+            await self._send_receipt(stream_id, report)
+        return not failed, None, 1
+
+    async def _send_receipt(self, stream_id: str, report: str) -> None:
+        """发回执并检查结果：send.text 默认会把结果塌成 bool(success)，sent 字段会被丢掉。"""
+
+        result = await self.ctx.send.text(report, stream_id, return_details=True)
+        sent = bool(result.get("sent")) if isinstance(result, dict) else bool(result)
+        if not sent:
+            self.ctx.logger.error("回执发送失败: stream_id=%s result=%r", stream_id, result)
 
     # ── 核心逻辑 ─────────────────────────────────────────────────
 
@@ -389,7 +398,11 @@ class JargonBoostPlugin(MaiBotPlugin):
         scan_limit = max(1, min(int(limit or DEFAULT_MANUAL_LIMIT), MAX_MANUAL_LIMIT))
         candidates = await self._scan_candidates(scan_limit, session_id)
         if not candidates:
-            return f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条）。"
+            return (
+                f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条）。"
+                "如果确定库里有够格的词条，可能是扫描窗口被其它会话的高 count 记录占满了，"
+                "重试或把 [boost] max_boosts_per_batch 调大一点。"
+            )
 
         boosted: List[str] = []
         failed = 0
@@ -440,13 +453,16 @@ class JargonBoostPlugin(MaiBotPlugin):
 
     @staticmethod
     def _entry_content(entry: Any) -> str:
-        """从条目里取出黑话内容；兼容字典和纯字符串两种形态。"""
+        """从条目里取出黑话内容；兼容字典和纯字符串两种形态。
+
+        未知形态直接抛：宿主改了 payload 结构时，静默返回空串只会让插件"什么都不做"。
+        """
 
         if isinstance(entry, dict):
             return str(entry.get("content") or "").strip()
         if isinstance(entry, str):
             return entry.strip()
-        return ""
+        raise TypeError(f"未预期的黑话条目类型: {type(entry).__name__}")
 
     async def _query_rows(self, content: str) -> List[Dict[str, Any]]:
         """按内容查询黑话记录；查询失败时返回空列表。"""

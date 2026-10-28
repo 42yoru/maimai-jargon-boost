@@ -382,7 +382,9 @@ class EntryAndCommandTests(PluginTestCase):
 
         self.assertEqual(plugin._entry_content({"content": " 脑婆 "}), "脑婆")
         self.assertEqual(plugin._entry_content(" 贴贴 "), "贴贴")
-        self.assertEqual(plugin._entry_content(None), "")
+        # 未知形态要抛：静默返回空串只会让插件"什么都不做"且没人知道
+        with self.assertRaises(TypeError):
+            plugin._entry_content(None)
 
     async def test_command_requires_operator_permission(self) -> None:
         """手动入口会写库并触发一批 LLM 推断，必须是 operator 权限。"""
@@ -421,7 +423,9 @@ class EntryAndCommandTests(PluginTestCase):
         result = await plugin.handle_command(stream_id=SESSION_ID, matched_groups={"args": ""})
 
         self.assertEqual(result, (False, None, 1))
-        self.assertEqual(self.host.sent, [])
+        # 关闭时也要回一句，不能静默吞掉命令
+        self.assertEqual(len(self.host.sent), 1)
+        self.assertIn("关闭", self.host.sent[0][1])
 
 
 class PermissionAndLeakTests(PluginTestCase):
