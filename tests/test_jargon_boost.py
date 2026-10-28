@@ -424,6 +424,43 @@ class EntryAndCommandTests(PluginTestCase):
         self.assertEqual(self.host.sent, [])
 
 
+class QueryBatchingTests(PluginTestCase):
+    """钩子路径不该为每个词条发一次 RPC。"""
+
+    async def test_hook_uses_single_window_query(self) -> None:
+        """一次提取多个词条时只发一次窗口查询。"""
+
+        self.host.rows = [
+            _row("脑婆", row_id=1, count=2),
+            _row("贴贴", row_id=2, count=2),
+            _row("awsl", row_id=3, count=2),
+        ]
+        plugin = await self.build_plugin()
+
+        await self.call_hook(plugin, [{"content": "脑婆"}, {"content": "贴贴"}, {"content": "awsl"}])
+
+        # 只有 on_load 的数据库自检 + 这一次窗口查询；三个词条不再各发一次
+        get_queries = [q for q in self.host.queries if str(q.get("query_type") or "get") == "get"]
+        self.assertEqual(len(get_queries), 2, self.host.queries)
+        # 默认 max_boosts_per_batch=2，所以只补两条
+        self.assertEqual(len(self.host.updates), 2)
+
+    async def test_entry_outside_window_falls_back_to_exact_query(self) -> None:
+        """窗口里没覆盖到的词条要再精确查一次，不能漏。"""
+
+        # 窗口只按 count 倒序取，这条 count 最低、会被挤在窗口外
+        self.host.rows = [_row("脑婆", row_id=1, count=1)]
+        plugin = await self.build_plugin()
+        async def empty_window() -> List[Dict[str, Any]]:
+            return []
+
+        plugin._query_candidates_window = empty_window  # type: ignore[method-assign]
+
+        rows = await plugin._collect_rows({"脑婆"})
+
+        self.assertIn("脑婆", rows)
+
+
 class CountConstraintTests(PluginTestCase):
     """count 相关配置必须受宿主阈值约束，不能把推断档位一次跨过去。"""
 

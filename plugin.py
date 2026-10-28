@@ -25,7 +25,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import asyncio
 import json
@@ -38,6 +38,9 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo
 from .config_ui import build_config_ui_schema
 
 JARGON_MODEL_NAME = "Jargon"
+
+JARGON_SCAN_WINDOW = 200
+"""钩子路径一次取回多少条「还没推断过」的记录用于内存匹配；没覆盖到的会再做精确查询。"""
 
 JARGON_FIRST_INFERENCE_THRESHOLD = 4
 """宿主首次推断的 count 阈值：把 count 补到 3，主程序本轮再 +1 就正好落到这里。"""
@@ -307,20 +310,58 @@ class JargonBoostPlugin(MaiBotPlugin):
         budget = config.max_boosts_per_batch
         if budget <= 0:
             return
+        contents = {content for content in (self._entry_content(entry) for entry in entries) if content}
+        if not contents:
+            return
+
         async with self._lock:
-            for entry in entries:
+            # 一次查询取回候选窗口再在内存里匹配：原来每个词条发一次 database.query，
+            # 主程序一次提取几十个词条就是几十次宿主往返（宿主侧是同步 SQLite，全部压在
+            # 主事件循环上）。窗口里没覆盖到的词条再走一次精确查询，保证不漏。
+            rows_by_content = await self._collect_rows(contents)
+            rows = [
+                row
+                for row in rows_by_content.values()
+                if self._is_boostable(row, session_id, config)
+            ]
+            # 先处理 count 更高的记录：它们离推断阈值最近，同样的预算更划算
+            rows.sort(key=lambda row: self._as_int(row.get("count")), reverse=True)
+            for row in rows:
                 if budget <= 0:
                     break
-                content = self._entry_content(entry)
-                if not content:
-                    continue
-                for row in await self._query_rows(content):
-                    if budget <= 0:
-                        break
-                    if not self._is_boostable(row, session_id, config):
-                        continue
-                    if await self._raise_count(row, config.target_count, dry_run=config.dry_run):
-                        budget -= 1
+                if await self._raise_count(row, config.target_count, dry_run=config.dry_run):
+                    budget -= 1
+
+    async def _collect_rows(self, contents: Set[str]) -> Dict[str, Dict[str, Any]]:
+        """按 content 收集候选记录：首选一次窗口查询，没覆盖到的再精确补查。"""
+
+        rows: Dict[str, Dict[str, Any]] = {}
+        window = await self._query_candidates_window()
+        for row in window:
+            content = str(row.get("content") or "").strip()
+            if content in contents:
+                rows[content] = row
+        for content in sorted(contents - set(rows)):
+            for row in await self._query_rows(content):
+                rows[content] = row
+                break
+        return rows
+
+    async def _query_candidates_window(self) -> List[Dict[str, Any]]:
+        """取一段"还没推断过"的黑话记录窗口，供内存匹配。"""
+
+        result = await self.ctx.db.query(
+            JARGON_MODEL_NAME,
+            query_type="get",
+            filters={"is_jargon": False, "last_inference_count": 0},
+            order_by=["-count"],
+            limit=JARGON_SCAN_WINDOW,
+        )
+        if isinstance(result, dict):
+            raise RuntimeError(f"查询黑话候选失败：{result.get('error') or result!r}")
+        if not isinstance(result, list):
+            raise TypeError(f"database.query 返回形状异常: {type(result).__name__}")
+        return [row for row in result if isinstance(row, dict)]
 
     async def _manual_boost(self, limit: int, dry_run: bool, session_id: str = "") -> str:
         """手动扫描一批候选记录并补 count，返回给用户看的回执。
@@ -377,8 +418,10 @@ class JargonBoostPlugin(MaiBotPlugin):
             order_by=["-count"],
             limit=max(limit * 3, 50),
         )
+        if isinstance(rows, dict):
+            raise RuntimeError(f"查询黑话候选失败：{rows.get('error') or rows!r}")
         if not isinstance(rows, list):
-            return []
+            raise TypeError(f"database.query 返回形状异常: {type(rows).__name__}")
         config = self.config.boost
         candidates = [
             row
