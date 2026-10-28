@@ -1,5 +1,16 @@
 # 更新记录
 
+## 0.3.1
+
+**变更**
+
+- manifest：`plugin_type` 由 `data` 改为 `knowledge`（`data` 不在 WebUI 的类型词表里，市场页会归到「其他」）；
+  `sdk` 区间由 `2.16.0–2.16.99` 改为 `2.12.0–2.99.99`——`Tool`/`ToolParameterInfo`/`ToolParamType`、
+  `HookHandler(timeout_ms=/error_policy=)`、`ctx.db.query(...)` 在 2.12.0 与 2.19.0 上签名一致，
+  原来那条上限还把实际在跑的 2.19.0 排除在外，每次加载都会多一条兼容性告警
+- 本机配置的 `shared_globally = true` 是**有意**的（确认宿主黑话配置是全局共享），
+  与 0.3.0 改过的默认值 `false` 不冲突；新装用户默认仍只处理当前会话
+
 ## 0.3.0
 
 **变更**
