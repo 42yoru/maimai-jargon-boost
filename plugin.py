@@ -8,7 +8,7 @@
 主程序随后会自己把 count 再 +1，并通过 `_should_infer_meaning` 判定，
 用原有的三段推断、原有的 prompt 和原有的含义写回流程完成确认。
 
-也提供手动入口（工具 `jargon_boost_run` / 命令 `/黑话加速`），
+只提供**命令**入口 `/黑话加速`（operator 权限，命令链路由宿主真实校验），
 不想等提取时可以直接扫一遍库、把够格的记录补上。
 
 为什么这样设计（异常关闭 / 重启相关）：
@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase, Tool
-from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder, ToolParameterInfo, ToolParamType
+from maibot_sdk import Command, Field, HookHandler, MaiBotPlugin, PluginConfigBase
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from pydantic import model_validator
 
 import asyncio
@@ -221,49 +221,6 @@ class JargonBoostPlugin(MaiBotPlugin):
 
     # ── 手动入口 ─────────────────────────────────────────────────
 
-    @Tool(
-        "jargon_boost_run",
-        # 这个工具会写库并触发一批 LLM 推断，命令入口有 permission="operator"，
-        # 工具通道以前没有任何门槛（任何会话都能诱导模型调用）。默认改成仅主人可用。
-        permission="operator",
-        description=(
-            "手动把已经出现多次、但还没到主程序推断阈值的黑话词条 count 补到首推档，"
-            "让主程序尽快完成含义确认。只有主人明确要求时才调用；"
-            "dry_run=true 时只检查不写入。"
-        ),
-        parameters=[
-            ToolParameterInfo(
-                name="dry_run",
-                param_type=ToolParamType.BOOLEAN,
-                description="只检查会补哪些词，不真的修改 count",
-                required=False,
-            ),
-            ToolParameterInfo(
-                name="limit",
-                param_type=ToolParamType.INTEGER,
-                description=f"最多补几条，默认 {DEFAULT_MANUAL_LIMIT}",
-                required=False,
-            ),
-        ],
-    )
-    async def handle_manual_boost(
-        self,
-        dry_run: bool = False,
-        limit: int = DEFAULT_MANUAL_LIMIT,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """工具入口：手动扫描并补 count。"""
-
-        session_id = str(kwargs.get("stream_id") or "").strip()
-        if not self._is_active():
-            return {"success": False, "content": "黑话加速器已在配置里关闭。"}
-        report = await self._manual_boost(
-            limit=limit,
-            dry_run=dry_run or self.config.boost.dry_run,
-            session_id=session_id,
-        )
-        return {"success": True, "content": report}
-
     @Command(
         "jargon_boost",
         description="手动把够格的黑话词条 count 补到推断阈值",
@@ -395,11 +352,18 @@ class JargonBoostPlugin(MaiBotPlugin):
         config = self.config.boost
         if not config.enabled:
             return "黑话加速器已在配置里关闭。"
+        # 回执里说清本次作用范围：shared_globally=true 会跨会话补 count，
+        # 调用者有权知道自己动的是哪些记录
+        scope_note = (
+            "本次扫描：所有会话（boost.shared_globally=true）"
+            if config.shared_globally
+            else "本次扫描：仅当前会话"
+        )
         scan_limit = max(1, min(int(limit or DEFAULT_MANUAL_LIMIT), MAX_MANUAL_LIMIT))
         candidates = await self._scan_candidates(scan_limit, session_id)
         if not candidates:
             return (
-                f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条）。"
+                f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条；{scope_note}）。"
                 "如果确定库里有够格的词条，可能是扫描窗口被其它会话的高 count 记录占满了，"
                 "重试或把 [boost] max_boosts_per_batch 调大一点。"
             )
@@ -415,7 +379,9 @@ class JargonBoostPlugin(MaiBotPlugin):
                     failed += 1
 
         mode = "预演" if dry_run else "已写入"
-        lines = [f"黑话加速器（{mode}）：候选 {len(candidates)} 条，处理 {len(boosted)} 条，失败 {failed} 条。"]
+        lines = [
+            f"黑话加速器（{mode}）：候选 {len(candidates)} 条，处理 {len(boosted)} 条，失败 {failed} 条；{scope_note}。"
+        ]
         lines.extend(f"- {item}" for item in boosted[:MAX_BOOST_LOGS])
         if len(boosted) > MAX_BOOST_LOGS:
             lines.append(f"- ……还有 {len(boosted) - MAX_BOOST_LOGS} 条")

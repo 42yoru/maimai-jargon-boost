@@ -136,9 +136,13 @@ WebUI 配置页按「常用设置 / 高级」两个页签展示，带中文标�
 
 | 入口 | 用法 | 说明 |
 |---|---|---|
-| 命令 | `/黑话加速` | 扫描并补 count，最多 20 条 |
+| 命令 | `/黑话加速` | 扫描并补 count，最多 20 条（`permission="operator"`，由宿主真实校验） |
 | 命令 | `/黑话加速 dry` | 只预演，返回会补哪些词，不写库 |
-| 工具 | `jargon_boost_run` | 由她在主人要求时调用，支持 `dry_run` / `limit` |
+
+**为什么只有命令、没有工具**：宿主的 `permission` 元数据只被命令链路消费
+（`_build_command_info` → `CommandInfo` → `has_command_permission`），工具的
+`_build_tool_definition` 根本不读它。也就是说给工具声明 `permission="operator"` 只是装饰，
+任何会话都能通过模型调用它写库。所以这个插件**不提供写库工具**，手动入口只有 operator 命令。
 
 ## 设计说明
 

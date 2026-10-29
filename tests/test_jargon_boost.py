@@ -428,6 +428,26 @@ class EntryAndCommandTests(PluginTestCase):
         self.assertIn("关闭", self.host.sent[0][1])
 
 
+class ScopeNoteTests(PluginTestCase):
+    """回执要说清本次扫描的作用范围。"""
+
+    async def test_receipt_states_session_scope(self) -> None:
+        self.host.rows = [_row("alpha", count=2)]
+        plugin = await self.build_plugin()
+
+        await plugin.handle_command(stream_id=SESSION_ID, matched_groups={"args": " dry "})
+
+        self.assertIn("仅当前会话", self.host.sent[-1][1])
+
+    async def test_receipt_states_global_scope(self) -> None:
+        self.host.rows = [_row("alpha", count=2)]
+        plugin = await self.build_plugin(shared_globally=True)
+
+        await plugin.handle_command(stream_id=SESSION_ID, matched_groups={"args": " dry "})
+
+        self.assertIn("所有会话", self.host.sent[-1][1])
+
+
 class PermissionAndLeakTests(PluginTestCase):
     """命令失败不泄内部细节；工具入口要有权限门。"""
 
@@ -451,14 +471,20 @@ class PermissionAndLeakTests(PluginTestCase):
         self.assertNotIn("/var/lib/secret", text)
         self.assertIn("日志", text)
 
-    async def test_tool_requires_operator_permission(self) -> None:
-        """工具通道和命令一样要有 operator 门槛。"""
+    async def test_no_tool_is_declared(self) -> None:
+        """手动写库只留 operator 命令，不再提供工具。
+
+        宿主的 `permission` 只被命令链路消费（`_build_command_info` → `CommandInfo` →
+        `has_command_permission`），工具的 `_build_tool_definition` 根本不读它——
+        所以给工具声明 `permission="operator"` 是装饰，不能当鉴权用。删掉工具才是可靠做法。
+        """
 
         plugin = await self.build_plugin()
+        components = {item.get("name"): item for item in plugin.get_components()}
 
-        tool = next(item for item in plugin.get_components() if item.get("name") == "jargon_boost_run")
-
-        self.assertEqual(tool["metadata"].get("permission"), "operator")
+        self.assertNotIn("jargon_boost_run", components)
+        # 命令上的 operator 是宿主真实校验的
+        self.assertEqual(components["jargon_boost"]["metadata"].get("permission"), "operator")
 
 
 class QueryBatchingTests(PluginTestCase):
