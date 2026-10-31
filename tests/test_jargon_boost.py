@@ -364,7 +364,8 @@ class ManualBoostTests(PluginTestCase):
 
         report = await plugin._manual_boost(limit=10, dry_run=False, session_id=SESSION_ID)
 
-        self.assertIn("没有需要提前确认的黑话", report)
+        self.assertIn("本次查询未返回可提前确认", report)
+        self.assertIn("不能证明数据库健康", report)
 
     async def test_manual_boost_disabled(self) -> None:
         plugin = await self.build_plugin(enabled=False)
@@ -502,26 +503,52 @@ class QueryBatchingTests(PluginTestCase):
 
         await self.call_hook(plugin, [{"content": "脑婆"}, {"content": "贴贴"}, {"content": "awsl"}])
 
-        # 只有 on_load 的数据库自检 + 这一次窗口查询；三个词条不再各发一次
+        # 自检 + 窗口 + 三个精确查询：窗口截断无法证明同内容的所有会话行已经覆盖。
         get_queries = [q for q in self.host.queries if str(q.get("query_type") or "get") == "get"]
-        self.assertEqual(len(get_queries), 2, self.host.queries)
+        self.assertEqual(len(get_queries), 5, self.host.queries)
         # 默认 max_boosts_per_batch=2，所以只补两条
         self.assertEqual(len(self.host.updates), 2)
 
     async def test_entry_outside_window_falls_back_to_exact_query(self) -> None:
         """窗口里没覆盖到的词条要再精确查一次，不能漏。"""
 
-        # 窗口只按 count 倒序取，这条 count 最低、会被挤在窗口外
         self.host.rows = [_row("脑婆", row_id=1, count=1)]
         plugin = await self.build_plugin()
+
         async def empty_window() -> List[Dict[str, Any]]:
             return []
 
         plugin._query_candidates_window = empty_window  # type: ignore[method-assign]
-
         rows = await plugin._collect_rows({"脑婆"})
 
-        self.assertIn("脑婆", rows)
+        self.assertTrue(any(row["content"] == "脑婆" for row in rows))
+
+    async def test_same_content_rows_keep_all_scopes_before_filtering(self) -> None:
+        """窗口内同名的其它会话记录不能覆盖当前会话记录。"""
+
+        self.host.rows = [
+            _row("脑婆", row_id=1, count=2, sessions={OTHER_SESSION: 1}),
+            _row("脑婆", row_id=2, count=2, sessions={SESSION_ID: 1}),
+        ]
+        plugin = await self.build_plugin(max_boosts_per_batch=1)
+
+        await self.call_hook(plugin, [{"content": "脑婆"}])
+
+        self.assertEqual(self.host.rows[0]["count"], 2)
+        self.assertEqual(self.host.rows[1]["count"], 3)
+
+    async def test_manual_scan_queries_only_eligible_counts_before_scope_filter(self) -> None:
+        """高 count 或其他会话候选不能占掉固定扫描窗口。"""
+
+        self.host.rows = [
+            *[_row(f"other-{index}", row_id=index + 1, count=3, sessions={OTHER_SESSION: 1}) for index in range(70)],
+            _row("当前候选", row_id=1000, count=2, sessions={SESSION_ID: 1}),
+        ]
+        plugin = await self.build_plugin()
+
+        rows = await plugin._scan_candidates(1, SESSION_ID)
+
+        self.assertEqual([row["content"] for row in rows], ["当前候选"])
 
 
 class CountConstraintTests(PluginTestCase):

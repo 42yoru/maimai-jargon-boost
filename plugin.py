@@ -163,14 +163,17 @@ class JargonBoostPlugin(MaiBotPlugin):
             config.shared_globally,
             config.dry_run,
         )
-        # 只读自检：确认钩子里要用的 database.query 能力能通，免得等到真正提取时才发现回环问题。
-        # 形状不对一律抛：db_get 内部会把异常吞成空列表，插件再"当没查到"就永远发现不了故障。
+        # 当前 database.query 能力会把部分宿主数据库异常折叠成空列表，插件无法仅凭
+        # list 形状区分「空库」和「查询失败」，因此这里只记录响应形状，不宣称数据库健康。
         rows = await self.ctx.db.query(JARGON_MODEL_NAME, query_type="get", limit=1)
         if isinstance(rows, dict):
             raise RuntimeError(f"数据库回环自检失败，database.query 返回错误: {rows.get('error') or rows!r}")
         if not isinstance(rows, list):
             raise TypeError(f"数据库回环自检失败，database.query 返回形状异常: {type(rows).__name__}")
-        self.ctx.logger.info("数据库回环自检通过：database.query 可用（样例记录 %s 条）", len(rows))
+        self.ctx.logger.info(
+            "数据库回环响应形状正常：database.query 返回列表（样例 %s 条；空列表不代表数据库健康）",
+            len(rows),
+        )
         if config.shared_globally:
             # shared_globally=true 时插件对库里所有 Jargon 记录放行；只有确认 bot 的黑话共享组是 */* 才安全，
             # 但插件读不到那份配置，只能提醒用户自己核对。
@@ -292,12 +295,8 @@ class JargonBoostPlugin(MaiBotPlugin):
             # 一次查询取回候选窗口再在内存里匹配：原来每个词条发一次 database.query，
             # 主程序一次提取几十个词条就是几十次宿主往返（宿主侧是同步 SQLite，全部压在
             # 主事件循环上）。窗口里没覆盖到的词条再走一次精确查询，保证不漏。
-            rows_by_content = await self._collect_rows(contents)
-            rows = [
-                row
-                for row in rows_by_content.values()
-                if self._is_boostable(row, session_id, config)
-            ]
+            collected_rows = await self._collect_rows(contents)
+            rows = [row for row in collected_rows if self._is_boostable(row, session_id, config)]
             # 先处理 count 更高的记录：它们离推断阈值最近，同样的预算更划算
             rows.sort(key=lambda row: self._as_int(row.get("count")), reverse=True)
             for row in rows:
@@ -306,19 +305,30 @@ class JargonBoostPlugin(MaiBotPlugin):
                 if await self._raise_count(row, config.target_count, dry_run=config.dry_run):
                     budget -= 1
 
-    async def _collect_rows(self, contents: Set[str]) -> Dict[str, Dict[str, Any]]:
-        """按 content 收集候选记录：首选一次窗口查询，没覆盖到的再精确补查。"""
+    async def _collect_rows(self, contents: Set[str]) -> List[Dict[str, Any]]:
+        """按 content 收集全部候选记录，保留同名跨会话行。"""
 
-        rows: Dict[str, Dict[str, Any]] = {}
+        rows: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
         window = await self._query_candidates_window()
         for row in window:
             content = str(row.get("content") or "").strip()
-            if content in contents:
-                rows[content] = row
-        for content in sorted(contents - set(rows)):
+            if content not in contents:
+                continue
+            row_id = str(row.get("id") or "")
+            key = row_id or f"{content}:{len(rows)}"
+            if key not in seen_ids:
+                seen_ids.add(key)
+                rows.append(row)
+        # 窗口按 count 截断，无法证明同名记录已全部覆盖；对每个内容补一次精确查询，
+        # 才能保留窗口外的同名跨会话记录并在后续作用域筛选时选对行。
+        for content in sorted(contents):
             for row in await self._query_rows(content):
-                rows[content] = row
-                break
+                row_id = str(row.get("id") or "")
+                key = row_id or f"{content}:{len(rows)}"
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    rows.append(row)
         return rows
 
     async def _query_candidates_window(self) -> List[Dict[str, Any]]:
@@ -363,9 +373,9 @@ class JargonBoostPlugin(MaiBotPlugin):
         candidates = await self._scan_candidates(scan_limit, session_id)
         if not candidates:
             return (
-                f"没有需要提前确认的黑话（扫描上限 {scan_limit} 条；{scope_note}）。"
-                "如果确定库里有够格的词条，可能是扫描窗口被其它会话的高 count 记录占满了，"
-                "重试或把 [boost] max_boosts_per_batch 调大一点。"
+                f"本次查询未返回可提前确认的黑话（处理上限 {scan_limit} 条；{scope_note}）。"
+                "当前宿主可能把数据库异常返回为空列表；若预期存在候选，请检查宿主数据库日志，"
+                "此结果不能证明数据库健康或确实没有候选。"
             )
 
         boosted: List[str] = []
@@ -390,32 +400,41 @@ class JargonBoostPlugin(MaiBotPlugin):
     async def _scan_candidates(self, limit: int, session_id: str = "") -> List[Dict[str, Any]]:
         """从数据库里挑出当前够格补 count 的记录。
 
-        Args:
-            limit: 最多返回多少条。
-            session_id: 触发入口所在的会话；shared_globally=false 时用它限制扫描范围。
-
-        Returns:
-            List[Dict[str, Any]]: 候选记录列表。
+        先按合法 count 分段查询，再做会话范围筛选，避免高 count 的其它会话记录
+        永久占满固定窗口。当前 database.query 没有可靠的 JSON 会话过滤器，因此
+        作用域筛选仍在插件侧完成。
         """
 
-        rows = await self.ctx.db.query(
-            JARGON_MODEL_NAME,
-            query_type="get",
-            filters={"is_jargon": False, "last_inference_count": 0},
-            order_by=["-count"],
-            limit=max(limit * 3, 50),
-        )
-        if isinstance(rows, dict):
-            raise RuntimeError(f"查询黑话候选失败：{rows.get('error') or rows!r}")
-        if not isinstance(rows, list):
-            raise TypeError(f"database.query 返回形状异常: {type(rows).__name__}")
         config = self.config.boost
-        candidates = [
-            row
-            for row in rows
-            if isinstance(row, dict) and self._is_boostable(row, session_id, config)
-        ]
-        return candidates[:limit]
+        rows: List[Dict[str, Any]] = []
+        seen_ids: Set[str] = set()
+        for count in range(config.min_count, config.target_count):
+            result = await self.ctx.db.query(
+                JARGON_MODEL_NAME,
+                query_type="get",
+                filters={
+                    "is_jargon": False,
+                    "last_inference_count": 0,
+                    "count": count,
+                },
+                order_by=["-count"],
+            )
+            if isinstance(result, dict):
+                raise RuntimeError(f"查询黑话候选失败：{result.get('error') or result!r}")
+            if not isinstance(result, list):
+                raise TypeError(f"database.query 返回形状异常: {type(result).__name__}")
+            for row in result:
+                if not isinstance(row, dict) or not self._is_boostable(row, session_id, config):
+                    continue
+                row_id = str(row.get("id") or "")
+                key = row_id or f"{row.get('content', '')}:{len(rows)}"
+                if key in seen_ids:
+                    continue
+                seen_ids.add(key)
+                rows.append(row)
+
+        rows.sort(key=lambda row: self._as_int(row.get("count")), reverse=True)
+        return rows[:limit]
 
     @staticmethod
     def _entry_content(entry: Any) -> str:
@@ -437,7 +456,6 @@ class JargonBoostPlugin(MaiBotPlugin):
             JARGON_MODEL_NAME,
             query_type="get",
             filters={"content": content},
-            limit=20,
         )
         if isinstance(result, dict):
             # 能力层出错时返回 {"success": False, "error": ...}：必须抛，不能当成"没查到"，
